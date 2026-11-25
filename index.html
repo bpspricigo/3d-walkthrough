@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3D walkthrough viewer</title>
+<style>
+  :root { --ink:#1d1d1f; --muted:#6e6e73; --panel:rgba(255,255,255,.92); --accent:#2f6f5e; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; overflow:hidden; background:#e9e6e1; font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); }
+  canvas { display:block; touch-action:none; }
+  #bar { position:fixed; top:12px; left:50%; transform:translateX(-50%); display:flex; gap:4px; padding:4px; background:var(--panel); border-radius:999px; box-shadow:0 2px 12px rgba(0,0,0,.12); z-index:5; }
+  #bar button { border:0; background:transparent; padding:8px 16px; border-radius:999px; font:inherit; font-weight:600; color:var(--muted); cursor:pointer; }
+  #bar button.on { background:var(--accent); color:#fff; }
+  #hint { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); padding:8px 14px; background:var(--panel); border-radius:10px; color:var(--muted); font-size:13px; box-shadow:0 2px 10px rgba(0,0,0,.1); z-index:5; max-width:92vw; text-align:center; }
+  #loader { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:#e9e6e1; z-index:10; }
+  #loader h1 { margin:0; font-size:22px; }
+  #loader p { margin:0; color:var(--muted); max-width:340px; text-align:center; padding:0 16px; }
+  #loader button { border:0; background:var(--accent); color:#fff; font:inherit; font-weight:600; padding:10px 20px; border-radius:999px; cursor:pointer; }
+  #loader.over { background:#dfe9e4; outline:3px dashed var(--accent); outline-offset:-16px; }
+  #stick { position:fixed; left:24px; bottom:70px; width:110px; height:110px; border-radius:50%; background:rgba(255,255,255,.35); border:2px solid rgba(255,255,255,.7); display:none; z-index:6; touch-action:none; }
+  #knob { position:absolute; left:35px; top:35px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,.9); }
+  body.walk.touch #stick { display:block; }
+  #cross { position:fixed; left:50%; top:50%; width:6px; height:6px; margin:-3px 0 0 -3px; border-radius:50%; background:rgba(255,255,255,.8); box-shadow:0 0 0 1px rgba(0,0,0,.3); display:none; z-index:4; pointer-events:none; }
+  body.walk #cross { display:block; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+  "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.8.3/build/index.module.js"
+} }
+</script>
+</head>
+<body>
+<div id="loader">
+  <h1>3D walkthrough</h1>
+  <p id="ltext">Drop a .glb model here, or choose one. It opens on this device only; nothing is uploaded.</p>
+  <button id="pick">Choose .glb file</button>
+  <input type="file" id="file" accept=".glb,.gltf" hidden>
+</div>
+<div id="bar"><button id="bDoll" class="on">Dollhouse</button><button id="bWalk">Walk</button></div>
+<div id="hint"></div>
+<div id="stick"><div id="knob"></div></div>
+<div id="cross"></div>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { computeBoundsTree, acceleratedRaycast } from 'three-mesh-bvh';
+
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
+const EYE = 1.6, RADIUS = 0.3, SPEED = 1.6;      // metres, m/s
+const isTouch = matchMedia('(pointer: coarse)').matches;
+if (isTouch) document.body.classList.add('touch');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.localClippingEnabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xe9e6e1);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.add(new THREE.HemisphereLight(0xffffff, 0xb8a990, 0.6));
+const sun = new THREE.DirectionalLight(0xfff3e0, 1.2); sun.position.set(6, 12, 4); scene.add(sun);
+
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 200);
+const orbit = new OrbitControls(camera, renderer.domElement);
+orbit.enableDamping = true; orbit.maxPolarAngle = Math.PI * 0.49;
+
+// Dollhouse cut: everything above this height is clipped away.
+const cut = new THREE.Plane(new THREE.Vector3(0, -1, 0), 2.1);
+
+const hint = document.getElementById('hint');
+const solids = [];               // meshes used for collision and floor picking
+let model, bounds, mode = 'doll';
+let floorY = 0;
+
+// ---------- open a model from this computer (nothing is uploaded) ----------
+const loader = new GLTFLoader().setMeshoptDecoder(MeshoptDecoder);
+const loaderEl = document.getElementById('loader'), ltext = document.getElementById('ltext');
+const fileIn = document.getElementById('file');
+document.getElementById('pick').onclick = () => fileIn.click();
+fileIn.onchange = () => fileIn.files[0] && openFile(fileIn.files[0]);
+addEventListener('dragover', e => { e.preventDefault(); loaderEl.classList.add('over'); });
+addEventListener('dragleave', () => loaderEl.classList.remove('over'));
+addEventListener('drop', e => { e.preventDefault(); loaderEl.classList.remove('over'); const f = e.dataTransfer.files[0]; if (f && !model) openFile(f); });
+function openFile(f) {
+  if (!/\.(glb|gltf)$/i.test(f.name)) { ltext.textContent = 'Please choose a .glb file.'; return; }
+  ltext.textContent = `Opening ${f.name} (${(f.size / 1048576).toFixed(1)} MB)…`;
+  document.getElementById('pick').style.display = 'none';
+  f.arrayBuffer().then(buf => loader.parse(buf, '', onModel, err => {
+    ltext.textContent = 'Could not open this file. Is it a GLB export?';
+    document.getElementById('pick').style.display = ''; console.error(err);
+  }));
+}
+
+function onModel(gltf) {
+  model = gltf.scene;
+  // put the model on the ground, centred
+  const b0 = new THREE.Box3().setFromObject(model), c0 = b0.getCenter(new THREE.Vector3());
+  model.position.set(-c0.x, -b0.min.y, -c0.z);
+  model.updateMatrixWorld(true);
+  model.traverse(o => {
+    if (!o.isMesh) return;
+    o.geometry.computeBoundsTree();
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    mats.forEach(m => { m.clippingPlanes = [cut]; m.clipIntersection = false; m.side = THREE.DoubleSide; });
+    solids.push(o);
+  });
+  scene.add(model);
+  model.updateMatrixWorld(true);
+  bounds = new THREE.Box3().setFromObject(model);
+  floorY = findFloorY();
+  setDoll(true);
+  loaderEl.remove();
+}
+
+// ---------- helpers ----------
+const ray = new THREE.Raycaster();
+ray.firstHitOnly = true;
+function castDown(x, z, fromY) {
+  ray.set(new THREE.Vector3(x, fromY, z), new THREE.Vector3(0, -1, 0)); ray.far = 10;
+  return ray.intersectObjects(solids, false)[0];
+}
+function findFloorY() {
+  // most common hit height when looking down from just under the ceiling
+  const hist = {};
+  for (let i = 0; i < 400; i++) {
+    const x = THREE.MathUtils.lerp(bounds.min.x, bounds.max.x, Math.random());
+    const z = THREE.MathUtils.lerp(bounds.min.z, bounds.max.z, Math.random());
+    const h = castDown(x, z, bounds.min.y + 1.2);
+    if (h) { const k = h.point.y.toFixed(2); hist[k] = (hist[k] || 0) + 1; }
+  }
+  return parseFloat(Object.entries(hist).sort((a, b) => b[1] - a[1])[0]?.[0] ?? bounds.min.y);
+}
+const dirs = [...Array(12)].map((_, i) => new THREE.Vector3(Math.cos(i * Math.PI / 6), 0, Math.sin(i * Math.PI / 6)));
+function clearance(p) {
+  let min = Infinity;
+  for (const d of dirs) {
+    for (const h of [0.4, 1.2]) {
+      ray.set(new THREE.Vector3(p.x, floorY + h, p.z), d); ray.far = 3;
+      const hit = ray.intersectObjects(solids, false)[0];
+      min = Math.min(min, hit ? hit.distance : 3);
+    }
+  }
+  return min;
+}
+function bestStart() {
+  // open spot on the main floor: sample a grid, keep the one with most room around it
+  // indoor spot (ceiling above, open around) closest to the middle of the plan
+  const mid = bounds.getCenter(new THREE.Vector3());
+  let best = null, bestD = Infinity;
+  const step = 0.5, up = new THREE.Vector3(0, 1, 0);
+  for (let x = bounds.min.x + 0.5; x < bounds.max.x; x += step)
+    for (let z = bounds.min.z + 0.5; z < bounds.max.z; z += step) {
+      const h = castDown(x, z, floorY + 1.0);
+      if (!h || Math.abs(h.point.y - floorY) > 0.05) continue;
+      ray.set(new THREE.Vector3(x, floorY + 1.0, z), up); ray.far = 3;
+      if (!ray.intersectObjects(solids, false)[0]) continue;
+      const d = Math.hypot(x - mid.x, z - mid.z);
+      if (d >= bestD) continue;
+      if (clearance(new THREE.Vector3(x, 0, z)) < 0.9) continue;
+      bestD = d; best = new THREE.Vector3(x, floorY, z);
+    }
+  return best || mid.setY(floorY);
+}
+
+// ---------- modes ----------
+let yaw = 0, pitch = 0;
+const pos = new THREE.Vector3();
+function setDoll(first) {
+  mode = 'doll'; document.body.classList.remove('walk');
+  bDoll.classList.add('on'); bWalk.classList.remove('on');
+  cut.constant = floorY + 2.1;
+  orbit.enabled = true;
+  const c = bounds.getCenter(new THREE.Vector3()).setY(floorY);
+  if (first) {
+    const r = Math.max(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z);
+    camera.position.set(c.x + r * 0.55, floorY + r * 0.9, c.z + r * 0.55);
+  } else {
+    camera.position.set(pos.x + 4, floorY + 8, pos.z + 6);
+  }
+  orbit.target.copy(c); orbit.update();
+  hint.textContent = isTouch ? 'Drag to turn, pinch to zoom. Tap a spot on the floor to walk from there.'
+                             : 'Drag to turn, scroll to zoom, right-drag to pan. Double-click a spot on the floor to walk from there.';
+}
+function setWalk(at) {
+  mode = 'walk'; document.body.classList.add('walk');
+  bWalk.classList.add('on'); bDoll.classList.remove('on');
+  orbit.enabled = false;
+  cut.constant = 1000;                     // no cut while walking
+  pos.copy(at || bestStart()); pos.y = floorY;
+  if (!at) { // face the most open direction
+    let far = 0; for (const d of dirs) { ray.set(new THREE.Vector3(pos.x, floorY + 1.2, pos.z), d); ray.far = 20;
+      const h = ray.intersectObjects(solids, false)[0]; const dist = h ? h.distance : 20; if (dist > far) { far = dist; yaw = Math.atan2(-d.x, -d.z); } }
+  } else {
+    const c = bounds.getCenter(new THREE.Vector3()); yaw = Math.atan2(-(c.x - pos.x), -(c.z - pos.z));
+  }
+  pitch = 0;
+  hint.textContent = isTouch ? 'Left stick to walk, drag anywhere else to look around.'
+                             : 'W A S D or arrow keys to walk, drag the mouse to look around. Shift to walk faster.';
+}
+bDoll.onclick = () => setDoll(false);
+bWalk.onclick = () => setWalk();
+
+// pick a floor spot in dollhouse mode
+function pickFloor(cx, cy) {
+  const ndc = new THREE.Vector2(cx / innerWidth * 2 - 1, -(cy / innerHeight) * 2 + 1);
+  ray.setFromCamera(ndc, camera); ray.far = 200;
+  const hits = ray.intersectObjects(solids, false).filter(h => h.point.y < cut.constant);
+  const h = hits[0];
+  if (h && Math.abs(h.point.y - floorY) < 0.15) setWalk(new THREE.Vector3(h.point.x, floorY, h.point.z));
+}
+renderer.domElement.addEventListener('dblclick', e => { if (mode === 'doll') pickFloor(e.clientX, e.clientY); });
+let tapStart = null;
+renderer.domElement.addEventListener('pointerdown', e => { tapStart = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+renderer.domElement.addEventListener('pointerup', e => {
+  if (mode === 'doll' && isTouch && tapStart && performance.now() - tapStart.t < 300 &&
+      Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) < 8) pickFloor(e.clientX, e.clientY);
+});
+
+// ---------- walk input ----------
+const keys = new Set();
+addEventListener('keydown', e => { keys.add(e.code); if (e.code === 'Escape' && mode === 'walk') setDoll(false); });
+addEventListener('keyup', e => keys.delete(e.code));
+let look = null;
+renderer.domElement.addEventListener('pointerdown', e => { if (mode === 'walk') { look = { id: e.pointerId, x: e.clientX, y: e.clientY }; renderer.domElement.setPointerCapture(e.pointerId); } });
+renderer.domElement.addEventListener('pointermove', e => {
+  if (!look || e.pointerId !== look.id) return;
+  const k = isTouch ? 0.005 : 0.0035;
+  yaw -= (e.clientX - look.x) * k; pitch -= (e.clientY - look.y) * k;
+  pitch = Math.max(-1.2, Math.min(1.2, pitch)); look.x = e.clientX; look.y = e.clientY;
+});
+const endLook = e => { if (look && e.pointerId === look.id) look = null; };
+renderer.domElement.addEventListener('pointerup', endLook);
+renderer.domElement.addEventListener('pointercancel', endLook);
+
+const stickEl = document.getElementById('stick'), knob = document.getElementById('knob');
+const stick = { x: 0, y: 0, id: null };
+stickEl.addEventListener('pointerdown', e => { stick.id = e.pointerId; stickEl.setPointerCapture(e.pointerId); moveStick(e); });
+stickEl.addEventListener('pointermove', e => { if (e.pointerId === stick.id) moveStick(e); });
+const endStick = e => { if (e.pointerId === stick.id) { stick.id = null; stick.x = stick.y = 0; knob.style.transform = ''; } };
+stickEl.addEventListener('pointerup', endStick); stickEl.addEventListener('pointercancel', endStick);
+function moveStick(e) {
+  const r = stickEl.getBoundingClientRect();
+  let dx = (e.clientX - r.left - r.width / 2) / 40, dy = (e.clientY - r.top - r.height / 2) / 40;
+  const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+  stick.x = dx; stick.y = dy; knob.style.transform = `translate(${dx * 35}px, ${dy * 35}px)`;
+}
+
+const fwd = new THREE.Vector3(), right = new THREE.Vector3(), mv = new THREE.Vector3();
+function blocked(from, dir, dist) {
+  for (const h of [0.35, 1.0, 1.5]) {
+    ray.set(new THREE.Vector3(from.x, floorY + h, from.z), dir); ray.far = dist + RADIUS;
+    if (ray.intersectObjects(solids, false)[0]) return true;
+  }
+  return false;
+}
+function walkStep(dt) {
+  let f = 0, s = 0;
+  if (keys.has('KeyW') || keys.has('ArrowUp')) f += 1;
+  if (keys.has('KeyS') || keys.has('ArrowDown')) f -= 1;
+  if (keys.has('KeyD') || keys.has('ArrowRight')) s += 1;
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) s -= 1;
+  f -= stick.y; s += stick.x;
+  fwd.set(-Math.sin(yaw), 0, -Math.cos(yaw)); right.set(-fwd.z, 0, fwd.x);
+  mv.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(right, s);
+  const len = mv.length();
+  if (len > 0.01) {
+    const speed = SPEED * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2 : 1);
+    mv.multiplyScalar(Math.min(len, 1) / len * speed * dt);
+    // slide along walls: try full move, then each axis
+    for (const v of [mv.clone(), new THREE.Vector3(mv.x, 0, 0), new THREE.Vector3(0, 0, mv.z)]) {
+      const d = v.length(); if (d < 1e-5) continue;
+      if (!blocked(pos, v.clone().normalize(), d)) { pos.add(v); break; }
+    }
+  }
+  camera.position.set(pos.x, floorY + EYE, pos.z);
+  camera.rotation.set(pitch, yaw, 0, 'YXZ');
+}
+
+// ---------- loop ----------
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 0.05);
+  if (model) { if (mode === 'walk') walkStep(dt); else orbit.update(); }
+  renderer.render(scene, camera);
+});
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+window.__dbg = { setWalk, setDoll, get floorY() { return floorY; }, get pos() { return pos; }, keys };
+</script>
+</body>
+</html>

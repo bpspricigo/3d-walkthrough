@@ -1,0 +1,4 @@
+# 3D models are private: send them directly, never commit them
+*.glb
+*.gltf
+*.bin
