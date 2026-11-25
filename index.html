@@ -18,9 +18,17 @@
   #loader p { margin:0; color:var(--muted); max-width:340px; text-align:center; padding:0 16px; }
   #loader button { border:0; background:var(--accent); color:#fff; font:inherit; font-weight:600; padding:10px 20px; border-radius:999px; cursor:pointer; }
   #loader.over { background:#dfe9e4; outline:3px dashed var(--accent); outline-offset:-16px; }
-  #stick { position:fixed; left:24px; bottom:70px; width:110px; height:110px; border-radius:50%; background:rgba(255,255,255,.35); border:2px solid rgba(255,255,255,.7); display:none; z-index:6; touch-action:none; }
-  #knob { position:absolute; left:35px; top:35px; width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,.9); }
-  body.walk.touch #stick { display:block; }
+  #bar #bSet { padding:8px 10px; display:flex; align-items:center; }
+  #bar #bSet svg { width:18px; height:18px; }
+  #settings { position:fixed; top:62px; left:50%; transform:translateX(-50%); width:min(300px,92vw); padding:14px 16px; background:var(--panel); border-radius:14px; box-shadow:0 2px 12px rgba(0,0,0,.12); z-index:5; display:none; }
+  #settings.open { display:block; }
+  #settings label { display:flex; justify-content:space-between; font-weight:600; margin-bottom:8px; }
+  #settings label span { color:var(--muted); font-weight:400; }
+  #settings input { width:100%; accent-color:var(--accent); }
+  /* floating joystick: shown under the thumb while the left half of the screen is touched */
+  #stick { position:fixed; width:120px; height:120px; margin:-60px 0 0 -60px; border-radius:50%; background:rgba(255,255,255,.35); border:2px solid rgba(255,255,255,.8); box-shadow:0 0 0 1px rgba(0,0,0,.12); display:none; z-index:6; pointer-events:none; }
+  #stick.show { display:block; }
+  #knob { position:absolute; left:38px; top:38px; width:44px; height:44px; border-radius:50%; background:rgba(255,255,255,.95); box-shadow:0 1px 4px rgba(0,0,0,.25); }
   #cross { position:fixed; left:50%; top:50%; width:6px; height:6px; margin:-3px 0 0 -3px; border-radius:50%; background:rgba(255,255,255,.8); box-shadow:0 0 0 1px rgba(0,0,0,.3); display:none; z-index:4; pointer-events:none; }
   body.walk #cross { display:block; }
 </style>
@@ -39,7 +47,11 @@
   <button id="pick">Choose .glb file</button>
   <input type="file" id="file" accept=".glb,.gltf" hidden>
 </div>
-<div id="bar"><button id="bDoll" class="on">Dollhouse</button><button id="bWalk">Walk</button></div>
+<div id="bar"><button id="bDoll" class="on">Dollhouse</button><button id="bWalk">Walk</button><button id="bSet" title="Settings" aria-label="Settings" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button></div>
+<div id="settings">
+  <label for="fov">Field of view in Walk mode <span id="fovVal"></span></label>
+  <input type="range" id="fov" min="40" max="100" step="1">
+</div>
 <div id="hint"></div>
 <div id="stick"><div id="knob"></div></div>
 <div id="cross"></div>
@@ -73,12 +85,27 @@ scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
 scene.add(new THREE.HemisphereLight(0xffffff, 0xb8a990, 0.6));
 const sun = new THREE.DirectionalLight(0xfff3e0, 1.2); sun.position.set(6, 12, 4); scene.add(sun);
 
-const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.05, 200);
+// ---------- field of view: fixed in dollhouse, user setting in walk mode ----------
+const DOLL_FOV = 55, WALK_FOV_DEFAULT = 75;
+const store = {   // localStorage can be unavailable (private mode, some embeds)
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+};
+let walkFov = THREE.MathUtils.clamp(+store.get('walkFov') || WALK_FOV_DEFAULT, 40, 100);
+
+const camera = new THREE.PerspectiveCamera(DOLL_FOV, innerWidth / innerHeight, 0.05, 200);
 const orbit = new OrbitControls(camera, renderer.domElement);
 orbit.enableDamping = true; orbit.maxPolarAngle = Math.PI * 0.49;
 
 // Dollhouse cut: everything above this height is clipped away.
 const cut = new THREE.Plane(new THREE.Vector3(0, -1, 0), 2.1);
+
+// ring on the floor marking where a tap / click is taking you
+const ring = new THREE.Mesh(
+  new THREE.RingGeometry(0.16, 0.24, 48).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x2f6f5e, transparent: true, opacity: 0.9, toneMapped: false,
+                                polygonOffset: true, polygonOffsetFactor: -4 }));
+ring.visible = false; ring.renderOrder = 2; scene.add(ring);
 
 const hint = document.getElementById('hint');
 const solids = [];               // meshes used for collision and floor picking
@@ -181,6 +208,8 @@ const pos = new THREE.Vector3();
 function setDoll(first) {
   mode = 'doll'; document.body.classList.remove('walk');
   bDoll.classList.add('on'); bWalk.classList.remove('on');
+  stopGlide(); endStick();
+  setFov(DOLL_FOV);
   cut.constant = floorY + 2.1;
   orbit.enabled = true;
   const c = bounds.getCenter(new THREE.Vector3()).setY(floorY);
@@ -198,6 +227,8 @@ function setWalk(at) {
   mode = 'walk'; document.body.classList.add('walk');
   bWalk.classList.add('on'); bDoll.classList.remove('on');
   orbit.enabled = false;
+  stopGlide();
+  setFov(walkFov);
   cut.constant = 1000;                     // no cut while walking
   pos.copy(at || bestStart()); pos.y = floorY;
   if (!at) { // face the most open direction
@@ -207,62 +238,116 @@ function setWalk(at) {
     const c = bounds.getCenter(new THREE.Vector3()); yaw = Math.atan2(-(c.x - pos.x), -(c.z - pos.z));
   }
   pitch = 0;
-  hint.textContent = isTouch ? 'Left stick to walk, drag anywhere else to look around.'
-                             : 'W A S D or arrow keys to walk, drag the mouse to look around. Shift to walk faster.';
+  hint.textContent = isTouch ? 'Touch the left side to walk, drag the right side to look. Tap the floor to go there.'
+                             : 'W A S D or arrow keys to walk, drag to look around, click the floor to go there. Shift to walk faster.';
 }
 bDoll.onclick = () => setDoll(false);
 bWalk.onclick = () => setWalk();
 
-// pick a floor spot in dollhouse mode
+// ---------- settings panel ----------
+const setEl = document.getElementById('settings'), fovIn = document.getElementById('fov'), fovVal = document.getElementById('fovVal');
+function setFov(v) { camera.fov = v; camera.updateProjectionMatrix(); }
+function showFov() { fovIn.value = walkFov; fovVal.textContent = `${walkFov}°`; }
+showFov();
+fovIn.oninput = () => {
+  walkFov = +fovIn.value; showFov(); store.set('walkFov', walkFov);
+  if (mode === 'walk') setFov(walkFov);
+};
+function toggleSettings(open = !setEl.classList.contains('open')) {
+  setEl.classList.toggle('open', open); bSet.setAttribute('aria-expanded', open);
+}
+bSet.onclick = () => toggleSettings();
+
+// floor point under a screen position, or null if that spot is not the floor
 function pickFloor(cx, cy) {
   const ndc = new THREE.Vector2(cx / innerWidth * 2 - 1, -(cy / innerHeight) * 2 + 1);
   ray.setFromCamera(ndc, camera); ray.far = 200;
-  const hits = ray.intersectObjects(solids, false).filter(h => h.point.y < cut.constant);
-  const h = hits[0];
-  if (h && Math.abs(h.point.y - floorY) < 0.15) setWalk(new THREE.Vector3(h.point.x, floorY, h.point.z));
+  const h = ray.intersectObjects(solids, false).find(h => h.point.y < cut.constant);
+  return h && Math.abs(h.point.y - floorY) < 0.15 ? new THREE.Vector3(h.point.x, floorY, h.point.z) : null;
 }
-renderer.domElement.addEventListener('dblclick', e => { if (mode === 'doll') pickFloor(e.clientX, e.clientY); });
-let tapStart = null;
-renderer.domElement.addEventListener('pointerdown', e => { tapStart = { x: e.clientX, y: e.clientY, t: performance.now() }; });
-renderer.domElement.addEventListener('pointerup', e => {
-  if (mode === 'doll' && isTouch && tapStart && performance.now() - tapStart.t < 300 &&
-      Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y) < 8) pickFloor(e.clientX, e.clientY);
-});
+// a tap (touch) or short click (mouse): dollhouse -> walk from there, walk -> glide there
+function onTap(cx, cy, touch) {
+  if (!model) return;
+  const p = pickFloor(cx, cy);
+  if (!p) return;
+  if (mode === 'walk') startGlide(p);
+  else if (touch) setWalk(p);            // mouse users double-click in the dollhouse, so a click can still orbit
+}
+renderer.domElement.addEventListener('dblclick', e => { if (mode === 'doll') { const p = pickFloor(e.clientX, e.clientY); if (p) setWalk(p); } });
 
 // ---------- walk input ----------
 const keys = new Set();
-addEventListener('keydown', e => { keys.add(e.code); if (e.code === 'Escape' && mode === 'walk') setDoll(false); });
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.code !== 'Escape') return;   // arrow keys on the slider must not walk
+  keys.add(e.code);
+  if (e.code === 'Escape') { if (setEl.classList.contains('open')) toggleSettings(false); else if (mode === 'walk') setDoll(false); }
+});
 addEventListener('keyup', e => keys.delete(e.code));
+addEventListener('blur', () => keys.clear());
+
+const canvas = renderer.domElement;
+const downs = new Map();                 // pointerId -> where and when it went down, for tap detection
 let look = null;
-renderer.domElement.addEventListener('pointerdown', e => { if (mode === 'walk') { look = { id: e.pointerId, x: e.clientX, y: e.clientY }; renderer.domElement.setPointerCapture(e.pointerId); } });
-renderer.domElement.addEventListener('pointermove', e => {
+const stickEl = document.getElementById('stick'), knob = document.getElementById('knob');
+const stick = { x: 0, y: 0, id: null, cx: 0, cy: 0 };
+const STICK_R = 42;                      // px of thumb travel for full speed
+
+canvas.addEventListener('pointerdown', e => {
+  toggleSettings(false);
+  downs.set(e.pointerId, { x: e.clientX, y: e.clientY, t: performance.now() });
+  if (mode !== 'walk') return;
+  try { canvas.setPointerCapture(e.pointerId); } catch {}   // capture is a nicety; never let it block the controls
+  if (e.pointerType === 'touch' && e.clientX < innerWidth / 2) {
+    if (stick.id === null) {             // floating stick appears under the thumb
+      stick.id = e.pointerId; stick.cx = e.clientX; stick.cy = e.clientY;
+      stickEl.style.left = `${e.clientX}px`; stickEl.style.top = `${e.clientY}px`;
+      stickEl.classList.add('show'); knob.style.transform = '';
+    }
+  } else if (!look && (e.pointerType !== 'mouse' || e.button === 0)) {
+    look = { id: e.pointerId, x: e.clientX, y: e.clientY };
+  }
+});
+canvas.addEventListener('pointermove', e => {
+  if (e.pointerId === stick.id) {
+    let dx = (e.clientX - stick.cx) / STICK_R, dy = (e.clientY - stick.cy) / STICK_R;
+    const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
+    stick.x = dx; stick.y = dy; knob.style.transform = `translate(${dx * 38}px, ${dy * 38}px)`;
+    return;
+  }
   if (!look || e.pointerId !== look.id) return;
-  const k = isTouch ? 0.005 : 0.0035;
+  const k = e.pointerType === 'touch' ? 0.005 : 0.0035;
   yaw -= (e.clientX - look.x) * k; pitch -= (e.clientY - look.y) * k;
   pitch = Math.max(-1.2, Math.min(1.2, pitch)); look.x = e.clientX; look.y = e.clientY;
 });
-const endLook = e => { if (look && e.pointerId === look.id) look = null; };
-renderer.domElement.addEventListener('pointerup', endLook);
-renderer.domElement.addEventListener('pointercancel', endLook);
-
-const stickEl = document.getElementById('stick'), knob = document.getElementById('knob');
-const stick = { x: 0, y: 0, id: null };
-stickEl.addEventListener('pointerdown', e => { stick.id = e.pointerId; stickEl.setPointerCapture(e.pointerId); moveStick(e); });
-stickEl.addEventListener('pointermove', e => { if (e.pointerId === stick.id) moveStick(e); });
-const endStick = e => { if (e.pointerId === stick.id) { stick.id = null; stick.x = stick.y = 0; knob.style.transform = ''; } };
-stickEl.addEventListener('pointerup', endStick); stickEl.addEventListener('pointercancel', endStick);
-function moveStick(e) {
-  const r = stickEl.getBoundingClientRect();
-  let dx = (e.clientX - r.left - r.width / 2) / 40, dy = (e.clientY - r.top - r.height / 2) / 40;
-  const l = Math.hypot(dx, dy); if (l > 1) { dx /= l; dy /= l; }
-  stick.x = dx; stick.y = dy; knob.style.transform = `translate(${dx * 35}px, ${dy * 35}px)`;
+function endStick() { stick.id = null; stick.x = stick.y = 0; knob.style.transform = ''; stickEl.classList.remove('show'); }
+function endPointer(e, cancelled) {
+  if (e.pointerId === stick.id) endStick();
+  if (look && e.pointerId === look.id) look = null;
+  const d = downs.get(e.pointerId); downs.delete(e.pointerId);
+  if (!cancelled && d && performance.now() - d.t < 350 && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 8 &&
+      (e.pointerType !== 'mouse' || e.button === 0)) onTap(e.clientX, e.clientY, e.pointerType !== 'mouse');
 }
+canvas.addEventListener('pointerup', e => endPointer(e, false));
+canvas.addEventListener('pointercancel', e => endPointer(e, true));
+
+// ---------- glide to a tapped spot ----------
+let glide = null;
+function startGlide(p) { glide = p; ring.position.set(p.x, floorY, p.z); ring.visible = true; }
+function stopGlide() { glide = null; ring.visible = false; }
 
 const fwd = new THREE.Vector3(), right = new THREE.Vector3(), mv = new THREE.Vector3();
 function blocked(from, dir, dist) {
   for (const h of [0.35, 1.0, 1.5]) {
     ray.set(new THREE.Vector3(from.x, floorY + h, from.z), dir); ray.far = dist + RADIUS;
     if (ray.intersectObjects(solids, false)[0]) return true;
+  }
+  return false;
+}
+// move pos by v, sliding along walls: try full move, then each axis. Returns false if nothing moved.
+function tryMove(v) {
+  for (const w of [v.clone(), new THREE.Vector3(v.x, 0, 0), new THREE.Vector3(0, 0, v.z)]) {
+    const d = w.length(); if (d < 1e-5) continue;
+    if (!blocked(pos, w.clone().normalize(), d)) { pos.add(w); return true; }
   }
   return false;
 }
@@ -276,14 +361,15 @@ function walkStep(dt) {
   fwd.set(-Math.sin(yaw), 0, -Math.cos(yaw)); right.set(-fwd.z, 0, fwd.x);
   mv.set(0, 0, 0).addScaledVector(fwd, f).addScaledVector(right, s);
   const len = mv.length();
-  if (len > 0.01) {
-    const speed = SPEED * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2 : 1);
-    mv.multiplyScalar(Math.min(len, 1) / len * speed * dt);
-    // slide along walls: try full move, then each axis
-    for (const v of [mv.clone(), new THREE.Vector3(mv.x, 0, 0), new THREE.Vector3(0, 0, mv.z)]) {
-      const d = v.length(); if (d < 1e-5) continue;
-      if (!blocked(pos, v.clone().normalize(), d)) { pos.add(v); break; }
-    }
+  const speed = SPEED * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 2 : 1);
+  if (len > 0.01) {                      // manual input always wins over a glide
+    stopGlide();
+    tryMove(mv.multiplyScalar(Math.min(len, 1) / len * speed * dt));
+  } else if (glide) {
+    mv.set(glide.x - pos.x, 0, glide.z - pos.z);
+    const dist = mv.length();
+    if (dist < 0.05) stopGlide();
+    else if (!tryMove(mv.multiplyScalar(Math.min(speed * dt, dist) / dist))) stopGlide();   // wall in the way
   }
   camera.position.set(pos.x, floorY + EYE, pos.z);
   camera.rotation.set(pitch, yaw, 0, 'YXZ');
@@ -300,7 +386,8 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-window.__dbg = { setWalk, setDoll, get floorY() { return floorY; }, get pos() { return pos; }, keys };
+window.__dbg = { setWalk, setDoll, get floorY() { return floorY; }, get pos() { return pos; }, get yaw() { return yaw; },
+                 get fov() { return camera.fov; }, get gliding() { return !!glide; }, keys };
 </script>
 </body>
 </html>
